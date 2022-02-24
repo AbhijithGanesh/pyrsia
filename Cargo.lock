@@ -1162,11 +1162,11 @@ checksum = "77f3309417938f28bf8228fcff79a4a37103981e3e186d2ccd19c74b38f4eb71"
 
 [[package]]
 name = "expectest"
-version = "0.10.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f316ecbad495f339742bc76d7c93df4dfd1b5b5b36593e8aa17e2a7f3e8a8a6f"
+checksum = "78817c0b64aab8153fbd7532339fbac1a54e43c715802715a288163ca6024978"
 dependencies = [
- "num-traits 0.1.43",
+ "num-traits",
 ]
 
 [[package]]
@@ -2751,15 +2751,6 @@ dependencies = [
 
 [[package]]
 name = "num-traits"
-version = "0.1.43"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92e5113e9fd4cc14ded8e499429f396a20f98c772a47cc8622a736e1ec843c31"
-dependencies = [
- "num-traits 0.2.14",
-]
-
-[[package]]
-name = "num-traits"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a64b1ec5cda2586e284722486d802acf1f7dbdc623e2bfc57e65ca1cd099290"
@@ -3270,7 +3261,7 @@ dependencies = [
  "log",
  "maplit",
  "multihash 0.15.0",
- "num-traits 0.2.14",
+ "num-traits",
  "once_cell",
  "pretty_env_logger",
  "rand 0.8.4",
