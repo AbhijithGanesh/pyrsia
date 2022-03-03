@@ -3293,7 +3293,6 @@ dependencies = [
  "core2",
  "digest 0.10.3",
  "multihash-derive 0.8.0",
- "parity-scale-codec 3.0.0",
  "serde",
  "serde-big-array",
  "sha2 0.10.2",
