@@ -19,13 +19,11 @@ pub mod command;
 use crate::network::artifact_protocol::ArtifactResponse;
 use crate::network::client::command::Command;
 use crate::network::idle_metric_protocol::{IdleMetricResponse, PeerMetrics};
-use crate::node_manager::model::package_version::PackageVersion;
-use futures::channel::{mpsc, oneshot};
-use futures::prelude::*;
 use libp2p::core::{Multiaddr, PeerId};
 use libp2p::request_response::ResponseChannel;
 use log::debug;
 use std::collections::HashSet;
+use tokio::sync::{mpsc, oneshot};
 
 /* peer metrics support */
 const PEER_METRIC_THRESHOLD: f64 = 0.5_f64;
@@ -41,7 +39,6 @@ use strum_macros::Display;
 /// within the libp2p swarm.
 #[derive(Clone, Debug, Display, PartialEq, Eq)]
 pub enum ArtifactType {
-    PackageVersion,
     Artifact,
 }
 
@@ -76,30 +73,6 @@ impl From<&str> for ArtifactHash {
     }
 }
 
-/// Construct an ArtifactHash from `PackageVersion`
-impl From<PackageVersion> for ArtifactHash {
-    fn from(package_version: PackageVersion) -> Self {
-        ArtifactHash {
-            hash: format!(
-                "{}/{}/{}",
-                package_version.namespace_id, package_version.name, package_version.version
-            ),
-        }
-    }
-}
-
-/// Construct an ArtifactHash from `&PackageVersion`
-impl From<&PackageVersion> for ArtifactHash {
-    fn from(package_version: &PackageVersion) -> Self {
-        ArtifactHash {
-            hash: format!(
-                "{}/{}/{}",
-                package_version.namespace_id, package_version.name, package_version.version
-            ),
-        }
-    }
-}
-
 /// The `Client` provides entry points to interact with the libp2p swarm.
 #[derive(Clone)]
 pub struct Client {
@@ -123,12 +96,13 @@ impl Client {
     }
 
     /// Dial a peer with the specified address.
-    pub async fn dial(&mut self, peer_addr: &Multiaddr) -> anyhow::Result<()> {
+    pub async fn dial(&mut self, peer_id: &PeerId, peer_addr: &Multiaddr) -> anyhow::Result<()> {
         debug!("p2p::Client::dial {:?}", peer_addr);
 
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Command::Dial {
+                peer_id: *peer_id,
                 peer_addr: peer_addr.clone(),
                 sender,
             })
@@ -312,11 +286,9 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node_manager::model::package_type::PackageTypeName;
     use libp2p::identity::Keypair;
     use rand::distributions::Alphanumeric;
     use rand::{thread_rng, Rng};
-    use serde_json::Map;
 
     #[tokio::test]
     async fn test_listen() {
@@ -331,8 +303,8 @@ mod tests {
         let cloned_address = address.clone();
         tokio::spawn(async move { client.listen(&address).await });
 
-        futures::select! {
-            command = receiver.next() => match command {
+        tokio::select! {
+            command = receiver.recv() => match command {
                 Some(Command::Listen { addr, sender }) => {
                     assert_eq!(addr, cloned_address);
                     let _ = sender.send(Ok(()));
@@ -346,18 +318,20 @@ mod tests {
     async fn test_dial() {
         let (sender, mut receiver) = mpsc::channel(1);
 
+        let local_peer_id = Keypair::generate_ed25519().public().to_peer_id();
         let mut client = Client {
             sender,
-            local_peer_id: Keypair::generate_ed25519().public().to_peer_id(),
+            local_peer_id,
         };
 
         let address: Multiaddr = "/ip4/127.0.0.1".parse().unwrap();
         let cloned_address = address.clone();
-        tokio::spawn(async move { client.dial(&address).await });
+        tokio::spawn(async move { client.dial(&local_peer_id, &address).await });
 
-        futures::select! {
-            command = receiver.next() => match command {
-                Some(Command::Dial { peer_addr, sender }) => {
+        tokio::select! {
+            command = receiver.recv() => match command {
+                Some(Command::Dial { peer_id, peer_addr, sender }) => {
+                    assert_eq!(peer_id, local_peer_id);
                     assert_eq!(peer_addr, cloned_address);
                     let _ = sender.send(Ok(()));
                 },
@@ -378,8 +352,8 @@ mod tests {
 
         tokio::spawn(async move { client.list_peers().await });
 
-        futures::select! {
-            command = receiver.next() => match command {
+        tokio::select! {
+            command = receiver.recv() => match command {
                 Some(Command::ListPeers { peer_id, sender }) => {
                     assert_eq!(peer_id, local_peer_id);
                     let _ = sender.send(Default::default());
@@ -403,8 +377,8 @@ mod tests {
         peers.insert(client.local_peer_id);
         tokio::spawn(async move { client.get_idle_peer(peers).await });
 
-        futures::select! {
-            command = receiver.next() => match command {
+        tokio::select! {
+            command = receiver.recv() => match command {
                 Some(Command::RequestIdleMetric { peer, sender }) => {
                     assert_eq!(peer, local_peer_id);
                     let peer_metric = PeerMetrics {
@@ -439,8 +413,8 @@ mod tests {
                 .await
         });
 
-        futures::select! {
-            command = receiver.next() => match command {
+        tokio::select! {
+            command = receiver.recv() => match command {
                 Some(Command::Provide { artifact_type, artifact_hash, sender }) => {
                     assert_eq!(artifact_type, ArtifactType::Artifact);
                     assert_eq!(artifact_hash.hash, cloned_random_hash);
@@ -472,8 +446,8 @@ mod tests {
                 .await
         });
 
-        futures::select! {
-            command = receiver.next() => match command {
+        tokio::select! {
+            command = receiver.recv() => match command {
                 Some(Command::ListProviders { artifact_type, artifact_hash, sender }) => {
                     assert_eq!(artifact_type, ArtifactType::Artifact);
                     assert_eq!(artifact_hash.hash, cloned_random_hash);
@@ -506,8 +480,8 @@ mod tests {
                 .await
         });
 
-        futures::select! {
-            command = receiver.next() => match command {
+        tokio::select! {
+            command = receiver.recv() => match command {
                 Some(Command::RequestArtifact { peer, artifact_type, artifact_hash, sender }) => {
                     assert_eq!(peer, other_peer_id);
                     assert_eq!(artifact_type, ArtifactType::Artifact);
@@ -544,47 +518,5 @@ mod tests {
         let artifact = ArtifactHash::from(&str);
 
         assert_eq!(artifact.hash, str);
-    }
-
-    #[test]
-    fn test_artifact_from_package_version() {
-        let id = "id".to_string();
-        let namespace = "namespace_id".to_string();
-        let name = "name".to_string();
-        let version = "1.5.4".to_string();
-        let package_version = PackageVersion::new(
-            id.clone(),
-            namespace.clone(),
-            name.clone(),
-            PackageTypeName::Docker,
-            Map::new(),
-            version.clone(),
-            vec![],
-        );
-
-        let artifact = ArtifactHash::from(package_version);
-
-        assert_eq!(artifact.hash, format!("{}/{}/{}", namespace, name, version));
-    }
-
-    #[test]
-    fn test_artifact_from_package_version_ref() {
-        let id = "id".to_string();
-        let namespace = "namespace_id".to_string();
-        let name = "name".to_string();
-        let version = "1.5.4".to_string();
-        let package_version = PackageVersion::new(
-            id.clone(),
-            namespace.clone(),
-            name.clone(),
-            PackageTypeName::Docker,
-            Map::new(),
-            version.clone(),
-            vec![],
-        );
-
-        let artifact = ArtifactHash::from(&package_version);
-
-        assert_eq!(artifact.hash, format!("{}/{}/{}", namespace, name, version));
     }
 }

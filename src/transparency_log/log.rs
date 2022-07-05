@@ -14,50 +14,132 @@
    limitations under the License.
 */
 
-use crate::util::env_util::read_var;
+use crate::artifact_service::service::PackageType;
+use libp2p::PeerId;
 use log::debug;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use tokio::sync::oneshot;
+use uuid::Uuid;
 
-#[derive(Debug, Clone, Error)]
-enum TransparencyLogError {
-    #[error("Duplicate ID {id:?} in transparency log")]
-    DuplicateId { id: String },
+#[derive(Debug, Clone, Error, PartialEq)]
+pub enum TransparencyLogError {
+    #[error("Duplicate ID {package_type_id} for type {package_type} in transparency log")]
+    DuplicateId {
+        package_type: PackageType,
+        package_type_id: String,
+    },
+    #[error("ID {package_type_id} for type {package_type} not found in transparency log")]
+    NotFound {
+        package_type: PackageType,
+        package_type_id: String,
+    },
+    #[error("Hash Verification failed for ID {id}: {invalid_hash} vs {actual_hash}")]
+    InvalidHash {
+        id: String,
+        invalid_hash: String,
+        actual_hash: String,
+    },
+    #[error("Invalid operation for ID {id}: {invalid_operation}")]
+    InvalidOperation {
+        id: String,
+        invalid_operation: Operation,
+    },
+    #[error("Failure while accessing underlying storage: {0}")]
+    StorageFailure(String),
 }
 
-#[derive(Debug, strum_macros::Display, Deserialize, Serialize)]
-enum Operation {
+impl From<io::Error> for TransparencyLogError {
+    fn from(err: io::Error) -> TransparencyLogError {
+        TransparencyLogError::StorageFailure(err.to_string())
+    }
+}
+
+impl From<rusqlite::Error> for TransparencyLogError {
+    fn from(err: rusqlite::Error) -> TransparencyLogError {
+        TransparencyLogError::StorageFailure(err.to_string())
+    }
+}
+
+#[derive(
+    Debug, Clone, strum_macros::Display, strum_macros::EnumString, Deserialize, Serialize, PartialEq,
+)]
+pub enum Operation {
     AddArtifact,
+    RemoveArtifact,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct Payload {
+pub struct TransparencyLog {
     id: String,
-    hash: String,
+    package_type: PackageType,
+    package_type_id: String,
+    pub artifact_hash: String,
+    source_hash: String,
+    artifact_id: String,
+    source_id: String,
     timestamp: u64,
     operation: Operation,
 }
 
-#[derive(Clone)]
-pub struct TransparencyLog {
-    payloads: HashMap<String, String>,
+pub struct AddArtifactRequest {
+    pub package_type: PackageType,
+    pub package_type_id: String,
+    pub artifact_hash: String,
+    pub source_hash: String,
 }
 
-impl TransparencyLog {
-    pub fn new() -> Self {
-        TransparencyLog {
-            payloads: HashMap::new(),
-        }
+/// The transparency log service is used by the artifact service to store and retrieve
+/// transparency log information about artifacts.
+///
+/// The transparency log itself depends on the blockchain component to retrieve
+/// transactions and to reach consensus on the publication of new transactions.
+///
+/// It uses a local database to store and index transparency log information to simplify
+/// access.
+pub struct TransparencyLogService {
+    storage_path: PathBuf,
+}
+
+impl TransparencyLogService {
+    pub fn new<P: AsRef<Path>>(repository_path: P) -> Result<Self, TransparencyLogError> {
+        let mut absolute_path = repository_path.as_ref().to_path_buf().canonicalize()?;
+        absolute_path.push("transparency_log");
+        Ok(TransparencyLogService {
+            storage_path: absolute_path,
+        })
     }
 
-    pub fn add_artifact(&mut self, id: &str, hash: &str) -> anyhow::Result<()> {
-        let payload = Payload {
-            id: id.to_string(),
-            hash: hash.to_string(),
+    /// Add a new authorized node to the p2p network.
+    pub fn add_authorized_node(&self, _peer_id: PeerId) -> Result<(), TransparencyLogError> {
+        Ok(())
+    }
+
+    /// Remove a known authorized node from the p2p network.
+    pub fn remove_authorized_node(&self, _peer_id: PeerId) -> Result<(), TransparencyLogError> {
+        Ok(())
+    }
+
+    /// Adds a transparency log with the AddArtifact operation.
+    pub async fn add_artifact(
+        &mut self,
+        add_artifact_request: AddArtifactRequest,
+        _sender: oneshot::Sender<Result<TransparencyLog, TransparencyLogError>>,
+    ) -> Result<(), TransparencyLogError> {
+        let transparency_log = TransparencyLog {
+            id: add_artifact_request.package_type_id.to_string(),
+            package_type: add_artifact_request.package_type,
+            package_type_id: add_artifact_request.package_type_id.to_string(),
+            artifact_hash: add_artifact_request.artifact_hash,
+            source_hash: add_artifact_request.source_hash,
+            artifact_id: Uuid::new_v4().to_string(),
+            source_id: Uuid::new_v4().to_string(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -65,147 +147,483 @@ impl TransparencyLog {
             operation: Operation::AddArtifact,
         };
 
-        let json_payload = write_payload(&payload)?;
-        self.payloads.insert(id.to_string(), json_payload);
+        // TODO: Blockchain::add_block(transaction(transparency_log))
+        // Wait for callback and resume
+
+        self.write_transparency_log(&transparency_log)?;
 
         Ok(())
     }
-}
 
-fn write_payload(payload: &Payload) -> anyhow::Result<String> {
-    let payload_storage_path = get_payload_storage_path();
-    fs::create_dir_all(&payload_storage_path)?;
-    let payload_filename = format!(
-        "{}/{}.log",
-        payload_storage_path,
-        str::replace(&payload.id, "/", "_")
-    );
-    debug!(
-        "Storing transparency log payload at: {:?}",
-        payload_filename
-    );
-    match fs::File::options()
-        .write(true)
-        .create_new(true)
-        .open(&payload_filename)
-    {
-        Ok(mut payload_file) => {
-            let json_payload = serde_json::to_string(payload)?;
-            payload_file.write_all(json_payload.as_bytes())?;
-            Ok(json_payload)
-        }
-        Err(e) => match e.kind() {
-            io::ErrorKind::AlreadyExists => Err(TransparencyLogError::DuplicateId {
-                id: payload.id.clone(),
-            }
-            .into()),
-            _ => Err(e.into()),
-        },
+    /// Adds a transparency log with the RemoveArtifact operation.
+    pub fn remove_artifact(
+        &mut self,
+        _package_type: &PackageType,
+        _package_type_id: &str,
+    ) -> Result<(), TransparencyLogError> {
+        Ok(())
     }
-}
 
-fn get_payload_storage_path() -> String {
-    format!(
-        "{}/{}",
-        read_var("PYRSIA_ARTIFACT_PATH", "pyrsia"),
-        "transparency_log"
-    )
-}
+    /// Gets the latest transparency log for the specified package of which the
+    /// operation is either AddArtifact or RemoveArtifact. Returns an error
+    /// when no transparency log could be found.
+    pub fn get_artifact(
+        &mut self,
+        package_type: &PackageType,
+        package_type_id: &str,
+    ) -> Result<TransparencyLog, TransparencyLogError> {
+        self.read_transparency_log(package_type, package_type_id)
+    }
 
-impl Default for TransparencyLog {
-    fn default() -> Self {
-        Self::new()
+    /// Search the transparency log database for a list of transparency logs using the
+    /// specified filter.
+    pub fn search_transparency_logs(&self) -> Result<Vec<TransparencyLog>, TransparencyLogError> {
+        Ok(vec![])
+    }
+
+    fn open_db(&self) -> Result<Connection, TransparencyLogError> {
+        fs::create_dir_all(&self.storage_path)?;
+        let db_storage_path = self.storage_path.to_str().unwrap();
+        let conn = Connection::open(db_storage_path.to_owned() + "/transparency_log.db")?;
+        match conn.execute(
+            "CREATE TABLE IF NOT EXISTS TRANSPARENCYLOG (
+                id TEXT PRIMARY KEY,
+                package_type TEXT,
+                package_type_id TEXT,
+                artifact_hash TEXT NOT NULL,
+                source_hash TEXT,
+                artifact_id TEXT,
+                source_id TEXT,
+                timestamp INTEGER,
+                operation TEXT NOT NULL
+            )",
+            [],
+        ) {
+            Ok(_) => Ok(conn),
+            Err(err) => {
+                debug!("Error creating transparency log database table: {:?}", err);
+                Err(err.into())
+            }
+        }
+    }
+
+    fn write_transparency_log(
+        &self,
+        transparency_log: &TransparencyLog,
+    ) -> Result<(), TransparencyLogError> {
+        let conn = self.open_db()?;
+
+        match conn.execute(
+            "INSERT INTO TRANSPARENCYLOG (id, package_type, package_type_id, artifact_hash, source_hash, artifact_id, source_id, timestamp, operation) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            [
+                transparency_log.id.to_string(),
+                transparency_log.package_type.to_string(),
+                transparency_log.package_type_id.to_string(),
+                transparency_log.artifact_hash.to_string(),
+                transparency_log.source_hash.to_string(),
+                transparency_log.artifact_id.to_string(),
+                transparency_log.source_id.to_string(),
+                transparency_log.timestamp.to_string(),
+                transparency_log.operation.to_string(),
+            ],
+        ) {
+            Ok(_) => {
+                debug!(
+                    "Transparency log inserted into database with id: {}",
+                    transparency_log.id
+                );
+                Ok(())
+            }
+            Err(rusqlite::Error::SqliteFailure(sqlite_error, ref _sqlite_options))
+                if sqlite_error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
+            {
+                Err(TransparencyLogError::DuplicateId {
+                    package_type: transparency_log.package_type,
+                    package_type_id: transparency_log.package_type_id.clone(),
+                })
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn read_transparency_log(
+        &self,
+        package_type: &PackageType,
+        package_type_id: &str,
+    ) -> Result<TransparencyLog, TransparencyLogError> {
+        let conn = self.open_db()?;
+
+        let mut stmt = conn.prepare("SELECT * FROM TRANSPARENCYLOG WHERE package_type = :package_type AND package_type_id = :package_type_id;")?;
+        let transparency_log_records = stmt.query_map(
+            &[
+                (":package_type", &*package_type.to_string()),
+                (":package_type_id", package_type_id),
+            ],
+            |row| {
+                Ok(TransparencyLog {
+                    id: row.get(0)?,
+                    package_type: {
+                        let pt: String = row.get(1)?;
+                        PackageType::from_str(&pt).unwrap()
+                    },
+                    package_type_id: row.get(2)?,
+                    artifact_hash: row.get(3)?,
+                    source_hash: row.get(4)?,
+                    artifact_id: row.get(5)?,
+                    source_id: row.get(6)?,
+                    timestamp: row.get(7)?,
+                    operation: {
+                        let op: String = row.get(8)?;
+                        Operation::from_str(&op).unwrap()
+                    },
+                })
+            },
+        )?;
+
+        let mut vector: Vec<TransparencyLog> = Vec::new();
+        for transparency_log_record in transparency_log_records {
+            let record = transparency_log_record?;
+            if record.operation == Operation::AddArtifact
+                || record.operation == Operation::RemoveArtifact
+            {
+                vector.push(record);
+            }
+        }
+
+        vector.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        let latest_record = vector
+            .into_iter()
+            .next()
+            .ok_or(TransparencyLogError::NotFound {
+                package_type: *package_type,
+                package_type_id: package_type_id.to_string(),
+            })?;
+
+        if latest_record.operation == Operation::RemoveArtifact {
+            return Err(TransparencyLogError::InvalidOperation {
+                id: latest_record.id,
+                invalid_operation: latest_record.operation,
+            });
+        }
+        Ok(latest_record)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assay::assay;
-    use std::env;
-    use std::path::Path;
+    use crate::util::test_util;
 
-    fn tear_down() {
-        if Path::new(&env::var("PYRSIA_ARTIFACT_PATH").unwrap()).exists() {
-            fs::remove_dir_all(env::var("PYRSIA_ARTIFACT_PATH").unwrap()).expect(&format!(
-                "unable to remove test directory {}",
-                env::var("PYRSIA_ARTIFACT_PATH").unwrap()
-            ));
-        }
+    #[test]
+    fn create_transparency_log() {
+        let id = "id";
+        let package_type = PackageType::Docker;
+        let package_type_id = "package_type_id";
+        let artifact_hash = "artifact_hash";
+        let source_hash = "source_hash";
+        let artifact_id = Uuid::new_v4().to_string();
+        let source_id = Uuid::new_v4().to_string();
+        let timestamp = 1234567890;
+        let operation = Operation::AddArtifact;
+        let transparency_log = TransparencyLog {
+            id: id.to_string(),
+            package_type,
+            package_type_id: package_type_id.to_string(),
+            artifact_hash: artifact_hash.to_string(),
+            source_hash: source_hash.to_string(),
+            artifact_id: artifact_id.to_string(),
+            source_id: source_id.to_string(),
+            timestamp,
+            operation: Operation::AddArtifact,
+        };
+
+        assert_eq!(transparency_log.id, id);
+        assert_eq!(transparency_log.package_type, package_type);
+        assert_eq!(transparency_log.package_type_id, package_type_id);
+        assert_eq!(transparency_log.artifact_hash, artifact_hash);
+        assert_eq!(transparency_log.source_hash, source_hash);
+        assert_eq!(transparency_log.artifact_id, artifact_id);
+        assert_eq!(transparency_log.source_id, source_id);
+        assert_eq!(transparency_log.timestamp, timestamp);
+        assert_eq!(transparency_log.operation, operation);
     }
 
-    #[assay(
-        env = [
-            ("PYRSIA_ARTIFACT_PATH", "pyrsia-test-transparency-log"),
-            ("DEV_MODE", "on")
-        ],
-        teardown = tear_down()
-    )]
-    fn test_new_transparency_log_has_empty_payload() {
-        let log = TransparencyLog::new();
+    #[test]
+    fn test_open_db() {
+        let tmp_dir = test_util::tests::setup();
 
-        assert_eq!(log.payloads.len(), 0);
-    }
+        let log = TransparencyLogService::new(&tmp_dir).unwrap();
 
-    #[assay(
-        env = [
-            ("PYRSIA_ARTIFACT_PATH", "pyrsia-test-transparency-log"),
-            ("DEV_MODE", "on")
-        ],
-        teardown = tear_down()
-    )]
-    fn test_with_default() {
-        let log: TransparencyLog = Default::default();
-
-        assert_eq!(log.payloads.len(), 0);
-    }
-
-    #[assay(
-        env = [
-            ("PYRSIA_ARTIFACT_PATH", "pyrsia-test-transparency-log"),
-            ("DEV_MODE", "on")
-        ],
-        teardown = tear_down()
-    )]
-    fn test_add_artifact() {
-        let mut log = TransparencyLog::new();
-
-        let result = log.add_artifact("id", "hash");
+        let result = log.open_db();
         assert!(result.is_ok());
 
-        assert!(log.payloads.contains_key("id"));
+        let conn = result.unwrap();
+        let mut path = log.storage_path;
+        path.push("transparency_log.db");
+        assert_eq!(conn.path().unwrap(), path.as_path());
+
+        test_util::tests::teardown(tmp_dir);
     }
 
-    #[assay(
-        env = [
-            ("PYRSIA_ARTIFACT_PATH", "pyrsia-test-transparency-log"),
-            ("DEV_MODE", "on")
-        ],
-        teardown = tear_down()
-    )]
-    fn test_add_artifact_with_id_containing_forward_slash() {
-        let mut log = TransparencyLog::new();
+    #[test]
+    fn test_write_tranparency_log() {
+        let tmp_dir = test_util::tests::setup();
 
-        let result = log.add_artifact("id/with/slash", "hash");
+        let log = TransparencyLogService::new(&tmp_dir).unwrap();
+
+        let transparency_log = TransparencyLog {
+            id: String::from("id"),
+            package_type: PackageType::Maven2,
+            package_type_id: String::from("package_type_id"),
+            artifact_hash: String::from("artifact_hash"),
+            source_hash: String::from("source_hash"),
+            artifact_id: Uuid::new_v4().to_string(),
+            source_id: Uuid::new_v4().to_string(),
+            timestamp: 1234567890,
+            operation: Operation::AddArtifact,
+        };
+
+        let result = log.write_transparency_log(&transparency_log);
         assert!(result.is_ok());
 
-        assert!(log.payloads.contains_key("id/with/slash"));
+        test_util::tests::teardown(tmp_dir);
     }
 
-    #[assay(
-        env = [
-            ("PYRSIA_ARTIFACT_PATH", "pyrsia-test-transparency-log"),
-            ("DEV_MODE", "on")
-        ],
-        teardown = tear_down()
-    )]
-    fn test_add_duplicate_artifact() {
-        let mut log = TransparencyLog::new();
+    #[test]
+    fn test_write_twice_transparency_log_error() {
+        let tmp_dir = test_util::tests::setup();
 
-        let result = log.add_artifact("id", "hash");
+        let log = TransparencyLogService::new(&tmp_dir).unwrap();
+
+        let transparency_log = TransparencyLog {
+            id: String::from("id"),
+            package_type: PackageType::Maven2,
+            package_type_id: String::from("package_type_id"),
+            artifact_hash: String::from("artifact_hash"),
+            source_hash: String::from("source_hash"),
+            artifact_id: Uuid::new_v4().to_string(),
+            source_id: Uuid::new_v4().to_string(),
+            timestamp: 1234567890,
+            operation: Operation::AddArtifact,
+        };
+
+        let mut result = log.write_transparency_log(&transparency_log);
         assert!(result.is_ok());
-
-        let result = log.add_artifact("id", "hash2");
+        result = log.write_transparency_log(&transparency_log);
         assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            TransparencyLogError::DuplicateId {
+                package_type: PackageType::Maven2,
+                package_type_id: String::from("package_type_id"),
+            }
+            .to_string()
+        );
+
+        test_util::tests::teardown(tmp_dir);
+    }
+
+    #[test]
+    fn test_read_transparency_log() {
+        let tmp_dir = test_util::tests::setup();
+
+        let log = TransparencyLogService::new(&tmp_dir).unwrap();
+
+        let transparency_log = TransparencyLog {
+            id: String::from("id"),
+            package_type: PackageType::Maven2,
+            package_type_id: String::from("package_type_id"),
+            artifact_hash: String::from("artifact_hash"),
+            source_hash: String::from("source_hash"),
+            artifact_id: Uuid::new_v4().to_string(),
+            source_id: Uuid::new_v4().to_string(),
+            timestamp: 1234567890,
+            operation: Operation::AddArtifact,
+        };
+
+        let result_write = log.write_transparency_log(&transparency_log);
+        assert!(result_write.is_ok());
+
+        let result_read = log.read_transparency_log(&PackageType::Maven2, "package_type_id");
+        assert!(result_read.is_ok());
+
+        test_util::tests::teardown(tmp_dir);
+    }
+
+    #[test]
+    fn test_read_transparency_log_invalid_id() {
+        let tmp_dir = test_util::tests::setup();
+
+        let log = TransparencyLogService::new(&tmp_dir).unwrap();
+
+        let transparency_log = TransparencyLog {
+            id: String::from("id"),
+            package_type: PackageType::Maven2,
+            package_type_id: String::from("package_type_id"),
+            artifact_hash: String::from("artifact_hash"),
+            source_hash: String::from("source_hash"),
+            artifact_id: Uuid::new_v4().to_string(),
+            source_id: Uuid::new_v4().to_string(),
+            timestamp: 1234567890,
+            operation: Operation::AddArtifact,
+        };
+
+        let result_write = log.write_transparency_log(&transparency_log);
+        assert!(result_write.is_ok());
+
+        let result_read =
+            log.read_transparency_log(&PackageType::Maven2, "invalid_package_type_id");
+        assert!(result_read.is_err());
+        assert_eq!(
+            result_read.err().unwrap().to_string(),
+            TransparencyLogError::NotFound {
+                package_type: PackageType::Maven2,
+                package_type_id: String::from("invalid_package_type_id"),
+            }
+            .to_string()
+        );
+
+        test_util::tests::teardown(tmp_dir);
+    }
+
+    #[test]
+    fn test_read_latest_transparency_log() {
+        let tmp_dir = test_util::tests::setup();
+
+        let log = TransparencyLogService::new(&tmp_dir).unwrap();
+
+        let transparency_log1 = TransparencyLog {
+            id: String::from("id1"),
+            package_type: PackageType::Maven2,
+            package_type_id: String::from("package_type_id1"),
+            artifact_hash: String::from("artifact_hash1"),
+            source_hash: String::from("source_hash1"),
+            artifact_id: Uuid::new_v4().to_string(),
+            source_id: Uuid::new_v4().to_string(),
+            timestamp: 10000000,
+            operation: Operation::AddArtifact,
+        };
+
+        let result_write1 = log.write_transparency_log(&transparency_log1);
+        assert!(result_write1.is_ok());
+
+        let transparency_log2 = TransparencyLog {
+            id: String::from("id2"),
+            package_type: PackageType::Maven2,
+            package_type_id: String::from("package_type_id2"),
+            artifact_hash: String::from("artifact_hash2"),
+            source_hash: String::from("source_hash2"),
+            artifact_id: Uuid::new_v4().to_string(),
+            source_id: Uuid::new_v4().to_string(),
+            timestamp: 20000000,
+            operation: Operation::AddArtifact,
+        };
+
+        let result_write2 = log.write_transparency_log(&transparency_log2);
+        assert!(result_write2.is_ok());
+
+        let result_read = log.read_transparency_log(&PackageType::Maven2, "package_type_id2");
+        assert!(result_read.is_ok());
+
+        test_util::tests::teardown(tmp_dir);
+    }
+
+    #[test]
+    fn test_read_remove_artifact_transparency_log() {
+        let tmp_dir = test_util::tests::setup();
+
+        let log = TransparencyLogService::new(&tmp_dir).unwrap();
+
+        let transparency_log = TransparencyLog {
+            id: String::from("id"),
+            package_type: PackageType::Maven2,
+            package_type_id: String::from("package_type_id"),
+            artifact_hash: String::from("artifact_hash"),
+            source_hash: String::from("source_hash"),
+            artifact_id: Uuid::new_v4().to_string(),
+            source_id: Uuid::new_v4().to_string(),
+            timestamp: 10000000,
+            operation: Operation::RemoveArtifact,
+        };
+
+        let result_write = log.write_transparency_log(&transparency_log);
+        assert!(result_write.is_ok());
+
+        let result_read = log.read_transparency_log(&PackageType::Maven2, "package_type_id");
+        assert!(result_read.is_err());
+        assert_eq!(
+            result_read.err().unwrap().to_string(),
+            TransparencyLogError::InvalidOperation {
+                id: String::from("id"),
+                invalid_operation: Operation::RemoveArtifact,
+            }
+            .to_string()
+        );
+
+        test_util::tests::teardown(tmp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_add_artifact() {
+        let tmp_dir = test_util::tests::setup();
+
+        let (sender, _receiver) = oneshot::channel();
+
+        let mut log = TransparencyLogService::new(&tmp_dir).unwrap();
+
+        let result = log
+            .add_artifact(
+                AddArtifactRequest {
+                    package_type: PackageType::Docker,
+                    package_type_id: "package_type_id".to_string(),
+                    artifact_hash: "artifact_hash".to_string(),
+                    source_hash: "source_hash".to_string(),
+                },
+                sender,
+            )
+            .await;
+        println!("RESULT: {:?}", result);
+        assert!(result.is_ok());
+
+        test_util::tests::teardown(tmp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_add_duplicate_artifact() {
+        let tmp_dir = test_util::tests::setup();
+
+        let (sender1, _receiver) = oneshot::channel();
+        let (sender2, _receiver) = oneshot::channel();
+
+        let mut log = TransparencyLogService::new(&tmp_dir).unwrap();
+
+        let result = log
+            .add_artifact(
+                AddArtifactRequest {
+                    package_type: PackageType::Docker,
+                    package_type_id: "package_type_id".to_string(),
+                    artifact_hash: "artifact_hash".to_string(),
+                    source_hash: "source_hash".to_string(),
+                },
+                sender1,
+            )
+            .await;
+        assert!(result.is_ok());
+
+        let result = log
+            .add_artifact(
+                AddArtifactRequest {
+                    package_type: PackageType::Docker,
+                    package_type_id: "package_type_id".to_string(),
+                    artifact_hash: "artifact_hash2".to_string(),
+                    source_hash: "source_hash2".to_string(),
+                },
+                sender2,
+            )
+            .await;
+        assert!(result.is_err());
+
+        test_util::tests::teardown(tmp_dir);
     }
 }

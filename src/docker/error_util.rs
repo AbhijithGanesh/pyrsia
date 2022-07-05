@@ -14,6 +14,7 @@
    limitations under the License.
 */
 
+use crate::transparency_log::log::TransparencyLogError;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -60,6 +61,14 @@ pub struct RegistryError {
 
 impl From<anyhow::Error> for RegistryError {
     fn from(err: anyhow::Error) -> RegistryError {
+        RegistryError {
+            code: RegistryErrorCode::Unknown(err.to_string()),
+        }
+    }
+}
+
+impl From<TransparencyLogError> for RegistryError {
+    fn from(err: TransparencyLogError) -> RegistryError {
         RegistryError {
             code: RegistryErrorCode::Unknown(err.to_string()),
         }
@@ -152,8 +161,10 @@ pub async fn custom_recover(err: Rejection) -> Result<impl Reply, Infallible> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact_service::service::PackageType;
     use std::io;
     use std::str;
+    use warp::reply::Response;
 
     #[test]
     fn from_io_error() {
@@ -193,8 +204,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn from_transparency_log_error() {
+        let transparency_log_error_1 = TransparencyLogError::NotFound {
+            package_type: PackageType::Docker,
+            package_type_id: String::from("package_type_id"),
+        };
+        let transparency_log_error_2 = TransparencyLogError::NotFound {
+            package_type: PackageType::Docker,
+            package_type_id: String::from("package_type_id"),
+        };
+
+        let registry_error: RegistryError = transparency_log_error_1.into();
+        assert_eq!(
+            registry_error.code,
+            RegistryErrorCode::Unknown(transparency_log_error_2.to_string())
+        );
+    }
+
     #[tokio::test]
-    async fn recover_from_registry_error() {
+    async fn custom_recover_from_registry_error_for_blob_unknown() {
         let registry_error = RegistryError {
             code: RegistryErrorCode::BlobUnknown,
         };
@@ -211,6 +240,105 @@ mod tests {
             .await
             .expect("Reply should be created.")
             .into_response();
+
+        verify_recover_response(response, expected_body, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn custom_recover_from_registry_error_for_blob_does_not_exist() {
+        let registry_error = RegistryError {
+            code: RegistryErrorCode::BlobDoesNotExist(String::from("non_existing_blob_hash")),
+        };
+
+        let expected_body = serde_json::to_string(&ErrorMessages {
+            errors: vec![ErrorMessage {
+                code: RegistryErrorCode::BlobDoesNotExist(String::from("non_existing_blob_hash")),
+                message: "".to_string(),
+            }],
+        })
+        .expect("Generating JSON body should not fail.");
+
+        let response = custom_recover(registry_error.into())
+            .await
+            .expect("Reply should be created.")
+            .into_response();
+
+        verify_recover_response(response, expected_body, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn custom_recover_from_registry_error_for_manifest_unknown() {
+        let registry_error = RegistryError {
+            code: RegistryErrorCode::ManifestUnknown,
+        };
+
+        let expected_body = serde_json::to_string(&ErrorMessages {
+            errors: vec![ErrorMessage {
+                code: RegistryErrorCode::ManifestUnknown,
+                message: "".to_string(),
+            }],
+        })
+        .expect("Generating JSON body should not fail.");
+
+        let response = custom_recover(registry_error.into())
+            .await
+            .expect("Reply should be created.")
+            .into_response();
+
+        verify_recover_response(response, expected_body, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn custom_recover_from_registry_error_for_unknown() {
+        let registry_error = RegistryError {
+            code: RegistryErrorCode::Unknown(String::from("unknown_error")),
+        };
+
+        let expected_body = serde_json::to_string(&ErrorMessages {
+            errors: vec![ErrorMessage {
+                code: RegistryErrorCode::Unknown("".to_string()),
+                message: String::from("unknown_error"),
+            }],
+        })
+        .expect("Generating JSON body should not fail.");
+
+        let response = custom_recover(registry_error.into())
+            .await
+            .expect("Reply should be created.")
+            .into_response();
+
+        verify_recover_response(response, expected_body, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[derive(Debug)]
+    struct UnhandledErrorForCustomRecover {}
+    impl Reject for UnhandledErrorForCustomRecover {}
+
+    #[tokio::test]
+    async fn custom_recover_from_registry_error_for_unhandled_error() {
+        let unhandled_error = UnhandledErrorForCustomRecover {};
+
+        let expected_body = serde_json::to_string(&ErrorMessages {
+            errors: vec![ErrorMessage {
+                code: RegistryErrorCode::Unknown("".to_string()),
+                message: String::from(""),
+            }],
+        })
+        .expect("Generating JSON body should not fail.");
+
+        let response = custom_recover(unhandled_error.into())
+            .await
+            .expect("Reply should be created.")
+            .into_response();
+
+        verify_recover_response(response, expected_body, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    async fn verify_recover_response(
+        response: Response,
+        expected_body: String,
+        expected_status: StatusCode,
+    ) {
         let status = response.status();
         let actual_body_bytes = hyper::body::to_bytes(response.into_body())
             .await
@@ -218,7 +346,7 @@ mod tests {
         let actual_body_str = str::from_utf8(&actual_body_bytes)
             .map(str::to_owned)
             .expect("Response body to be converted to string");
-        assert_eq!(status, 404);
+        assert_eq!(status, expected_status);
         assert_eq!(actual_body_str, expected_body);
     }
 }

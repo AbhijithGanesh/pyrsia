@@ -1,8 +1,9 @@
 # How to run 2 Pyrsia nodes natively on 1 MacOS machine
 
-Download a fresh copy of the codebase by cloning the repo or updating to the
-HEAD of `main`. Let's call this folder `PYRSIA_HOME`. We will refer to this
-name in the following steps.
+Download the release version of Pyrsia from [Release v0.1.0](https://github.com/pyrsia/pyrsia/releases/tag/v0.1.0)
+Untar/Unzip the downloaded source code in a local folder.
+
+Let's call this folder `PYRSIA_HOME`. We will refer to this name in the following steps.
 
 Build binaries for `pyrsia_node` by running:
 
@@ -16,7 +17,7 @@ cargo build --workspace
 This will create two copies of the same binary so that you can configure them
 as independent nodes. In `PYRSIA_HOME`,
 
- - Create Node A
+- Create Node A
 
   ```sh
   mkdir nodeA
@@ -167,7 +168,7 @@ Connected Peers:
 Now that you have setup both the Pyrsia Node and Pyrsia CLI you are ready to
 start using Pyrsia.
 
-# Using Pyrsia with Docker
+## Using Pyrsia with Docker
 
 Once you have setup the Pyrsia nodes and the CLI you are ready to start using
 Pyrsia with Docker.
@@ -237,5 +238,4 @@ Success!!!
 You have just built yourself a working Pyrsia network. Enjoy using it and
 showcasing it to your teams and please share any feedback!
 
-Next you can, follow the instructions in [demo.md](https://pyrsia.io/tutorials/demo/)
-and setup a real Pyrsia network and use it with your CI system.
+Next you can follow the [demo instructions](https://pyrsia.io/docs/tutorials/demo/) and setup a real Pyrsia network and use it with your CI system.

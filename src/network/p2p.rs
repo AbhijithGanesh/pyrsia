@@ -14,6 +14,7 @@
    limitations under the License.
 */
 
+use crate::artifact_service::storage::ARTIFACTS_DIR;
 use crate::network::artifact_protocol::{ArtifactExchangeCodec, ArtifactExchangeProtocol};
 use crate::network::behaviour::PyrsiaNetworkBehaviour;
 use crate::network::client::Client;
@@ -21,11 +22,8 @@ use crate::network::event_loop::{PyrsiaEvent, PyrsiaEventLoop};
 use crate::network::idle_metric_protocol::{IdleMetricExchangeCodec, IdleMetricExchangeProtocol};
 use crate::util::keypair_util;
 
-use futures::channel::mpsc;
-use futures::prelude::*;
 use libp2p::core;
 use libp2p::dns;
-use libp2p::identify;
 use libp2p::identity;
 use libp2p::kad;
 use libp2p::kad::record::store::{MemoryStore, MemoryStoreConfig};
@@ -38,6 +36,10 @@ use libp2p::yamux;
 use libp2p::Transport;
 use std::error::Error;
 use std::iter;
+use std::path::PathBuf;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::Stream;
 
 /// Sets up the libp2p [`Swarm`] with the necessary components, doing the following things:
 ///
@@ -106,7 +108,8 @@ use std::iter;
 pub fn setup_libp2p_swarm(
     max_provided_keys: usize,
 ) -> Result<(Client, impl Stream<Item = PyrsiaEvent>, PyrsiaEventLoop), Box<dyn Error>> {
-    let local_keypair = keypair_util::load_or_generate_ed25519();
+    let local_keypair =
+        keypair_util::load_or_generate_ed25519(PathBuf::from(ARTIFACTS_DIR.as_str()));
 
     let (swarm, local_peer_id) = create_swarm(local_keypair, max_provided_keys)?;
 
@@ -118,7 +121,7 @@ pub fn setup_libp2p_swarm(
             sender: command_sender,
             local_peer_id,
         },
-        event_receiver,
+        ReceiverStream::new(event_receiver),
         PyrsiaEventLoop::new(swarm, command_receiver, event_sender),
     ))
 }
@@ -152,9 +155,6 @@ fn create_swarm(
 ) -> Result<(Swarm<PyrsiaNetworkBehaviour>, core::PeerId), Box<dyn Error>> {
     let peer_id = keypair.public().to_peer_id();
 
-    let identify_config =
-        identify::IdentifyConfig::new(String::from("ipfs/1.0.0"), keypair.public());
-
     let memory_store_config = MemoryStoreConfig {
         max_provided_keys,
         ..Default::default()
@@ -164,7 +164,6 @@ fn create_swarm(
         SwarmBuilder::new(
             create_transport(keypair)?,
             PyrsiaNetworkBehaviour {
-                identify: identify::Identify::new(identify_config),
                 kademlia: kad::Kademlia::new(
                     peer_id,
                     MemoryStore::with_config(peer_id, memory_store_config),
