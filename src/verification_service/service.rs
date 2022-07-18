@@ -15,11 +15,11 @@
 */
 
 use thiserror::Error;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use pyrsia_blockchain_network::structures::transaction::Transaction;
 
-use crate::build_service::service::BuildService;
+use crate::build_service::event::BuildEvent;
 
 #[derive(Debug, Error)]
 pub enum VerificationError {}
@@ -28,16 +28,15 @@ pub struct VerificationResult {}
 
 /// The verification service is a component used by authorized nodes only.
 /// It implements all necessary logic to verify blockchain transactions.
-#[derive(Default)]
 pub struct VerificationService {
-    _build_service: BuildService,
+    _build_event_sender: mpsc::Sender<BuildEvent>,
 }
 
 impl VerificationService {
-    pub fn new() -> Self {
-        VerificationService {
-            _build_service: BuildService {},
-        }
+    pub fn new(build_event_sender: mpsc::Sender<BuildEvent>) -> Result<Self, anyhow::Error> {
+        Ok(VerificationService {
+            _build_event_sender: build_event_sender,
+        })
     }
 
     /// Verify a build for the specified transaction. This method is
@@ -68,7 +67,9 @@ mod tests {
 
         let (sender, _) = oneshot::channel();
 
-        let verification_service = VerificationService::new();
+        let (build_command_sender, _build_command_receiver) = mpsc::channel(1);
+
+        let verification_service = VerificationService::new(build_command_sender).unwrap();
         let verification_result = verification_service
             .verify_transaction(transaction, sender)
             .await;
