@@ -2608,9 +2608,9 @@ dependencies = [
 
 [[package]]
 name = "multihash"
-version = "0.16.0"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "555c27b066e003be703281d408a80243bf7aa5fdeeaacf7098c52802f2d4a518"
+checksum = "e3db354f401db558759dfc1e568d010a5d4146f4d3f637be1275ec4a3cf09689"
 dependencies = [
  "blake2b_simd",
  "blake2s_simd",
@@ -2618,7 +2618,7 @@ dependencies = [
  "core2",
  "digest 0.10.3",
  "multihash-derive",
- "parity-scale-codec 2.3.1",
+ "parity-scale-codec 3.1.2",
  "serde",
  "serde-big-array",
  "sha2 0.10.2",
