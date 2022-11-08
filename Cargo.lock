@@ -1931,7 +1931,7 @@ dependencies = [
  "libsecp256k1",
  "log",
  "multiaddr",
- "multihash",
+ "multihash 0.16.3",
  "multistream-select",
  "parking_lot 0.12.1",
  "pin-project",
@@ -2565,7 +2565,7 @@ dependencies = [
  "bs58",
  "byteorder",
  "data-encoding",
- "multihash",
+ "multihash 0.16.3",
  "percent-encoding",
  "serde",
  "static_assertions",
@@ -2575,9 +2575,24 @@ dependencies = [
 
 [[package]]
 name = "multihash"
-version = "0.16.0"
+version = "0.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "555c27b066e003be703281d408a80243bf7aa5fdeeaacf7098c52802f2d4a518"
+checksum = "1c346cf9999c631f002d8f977c4eaeaa0e6386f16007202308d0b3757522c2cc"
+dependencies = [
+ "core2",
+ "digest 0.10.5",
+ "multihash-derive",
+ "serde",
+ "serde-big-array",
+ "sha2 0.10.6",
+ "unsigned-varint",
+]
+
+[[package]]
+name = "multihash"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "835d6ff01d610179fbce3de1694d007e500bf33a7f29689838941d6bf783ae40"
 dependencies = [
  "blake2b_simd",
  "blake2s_simd",
@@ -2585,7 +2600,7 @@ dependencies = [
  "core2",
  "digest 0.10.5",
  "multihash-derive",
- "parity-scale-codec 2.3.1",
+ "parity-scale-codec 3.1.5",
  "serde",
  "serde-big-array",
  "sha2 0.10.6",
@@ -3243,7 +3258,7 @@ dependencies = [
  "libp2p",
  "log",
  "maplit",
- "multihash",
+ "multihash 0.17.0",
  "num-traits",
  "once_cell",
  "pin-utils",
@@ -3290,7 +3305,7 @@ dependencies = [
  "hex",
  "libp2p",
  "log",
- "multihash",
+ "multihash 0.17.0",
  "once_cell",
  "parity-scale-codec 2.3.1",
  "pretty_env_logger",
